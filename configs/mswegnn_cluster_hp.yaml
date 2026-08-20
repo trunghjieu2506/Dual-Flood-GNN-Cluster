@@ -1,0 +1,78 @@
+dataset_parameters:
+  storage_mode: memory
+  root_dir: data_mswegnn/datasets
+  features_stats_file: boundary_aware_screening_features_stats.yaml
+  previous_timesteps: 1
+  normalize: true
+  boundary_aware_features: true
+  prepare_local_mass_for_search: false
+  timestep_interval: 7200
+  spin_up_time: 0
+  time_from_peak: null
+  inflow_boundary_nodes: []
+  outflow_boundary_nodes: []
+  training:
+    dataset_summary_file: train.csv
+    event_stats_file: boundary_aware_screening_train_event_stats.yaml
+  testing:
+    dataset_summary_file: test.csv
+    event_stats_file: boundary_aware_screening_test_event_stats.yaml
+  dataset_type: mswegnn
+  boundary_aware_feature_groups:
+    node_type_flags: true
+    node_distances: true
+    edge_type_flags: true
+    edge_boundary_normals: true
+    edge_bc_flow: true
+  boundary_aware_cache_prefix: boundary_aware_screening_
+  validation_storage_mode: disk
+training_parameters:
+  log_path: logs/mswegnn_cluster_hp_screening.log
+  model_dir: saved_models/mswegnn_cluster_hp_screening
+  stats_dir: training_stats/mswegnn_cluster_hp_screening
+  checkpoint_path: null
+  num_epochs: 60
+  num_epochs_dyn_loss: 0
+  batch_size: 32
+  learning_rate: 0.0001
+  adam_weight_decay: 0
+  gradient_clip_value: 0.5
+  early_stopping_patience: 15
+  val_split_percent: 0.25
+  autoregressive:
+    enabled: true
+    init_num_timesteps: 2
+    total_num_timesteps: 6
+    timestep_increment: 2
+    max_curriculum_epochs: 10
+    learning_rate_decay: 0.7
+loss_func_parameters:
+  node_loss: mse
+  edge_loss: mse
+  node_loss_weight: 1.0
+  edge_pred_loss_scale: 1.0
+  edge_loss_weight: 0.4
+  use_global_mass_loss: false
+  global_mass_loss_scale: 1.4e-09
+  global_mass_loss_weight: 0.01
+  use_local_mass_loss: false
+  local_mass_loss_scale: 1.19e-09
+  local_mass_loss_weight: 0.01
+  huber:
+    delta: 0.15
+testing_parameters:
+  log_path: null
+  output_dir: saved_metrics/mswegnn_cluster_hp_screening
+  rollout_start: 0
+  rollout_timesteps: 6
+model_parameters:
+  DUALFloodGNN:
+    hidden_features: 64
+    num_layers: 3
+    activation: relu
+    residual: true
+    mlp_layers: 3
+    encoder_layers: 3
+    encoder_activation: relu
+    decoder_layers: 3
+    decoder_activation: relu

@@ -8,7 +8,7 @@ from .logger import Logger
 from .file_utils import create_temp_dirs
 from .model_utils import get_loss_func
 
-def split_dataset_events(root_dir: str, dataset_summary_file: str, percent_validation: float) -> Tuple[str, str]:
+def split_dataset_events(root_dir: str, dataset_summary_file: str, percent_validation: float, temp_dir_name: str = 'train_val_split') -> Tuple[str, str]:
     if not (0 < percent_validation < 1):
         raise ValueError(f'Invalid percent_split: {percent_validation}. Must be between 0 and 1.')
 
@@ -22,15 +22,14 @@ def split_dataset_events(root_dir: str, dataset_summary_file: str, percent_valid
     num_val_events = max(int(len(summary_df) * percent_validation), 1)
     split_idx = len(summary_df) - num_val_events
 
-    TEMP_DIR_NAME = 'train_val_split'
-    create_temp_dirs(raw_dir_path, folder_name=TEMP_DIR_NAME)
+    create_temp_dirs(raw_dir_path, folder_name=temp_dir_name)
 
     train_rows = summary_df[:split_idx]
-    train_df_file = os.path.join(TEMP_DIR_NAME, f'train_split_{dataset_summary_file}')
+    train_df_file = os.path.join(temp_dir_name, f'train_split_{dataset_summary_file}')
     train_rows.to_csv(os.path.join(raw_dir_path, train_df_file), index=False)
 
     val_rows = summary_df[split_idx:]
-    val_df_file = os.path.join(TEMP_DIR_NAME, f'val_split_{dataset_summary_file}')
+    val_df_file = os.path.join(temp_dir_name, f'val_split_{dataset_summary_file}')
     val_rows.to_csv(os.path.join(raw_dir_path, val_df_file), index=False)
 
     return train_df_file, val_df_file

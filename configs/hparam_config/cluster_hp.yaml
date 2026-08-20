@@ -1,0 +1,65 @@
+num_trials: 160
+num_folds: 1
+fold_seed: 42
+manifest_dir: cv_manifests
+objective_metrics: [depth_mae, unit_discharge_mae]
+objective_source: validation
+hard_prune_max_objective: 1.0
+memory_tier: a100_40
+temp_dir_name: hp_search_screening
+output_dir: optuna_results/mswegnn_cluster_screening
+
+pruner:
+  n_startup_trials: 30
+  n_warmup_steps: 5
+  interval_steps: 1
+
+hyperparameters:
+  hidden_features:
+    type: categorical
+    choices: [64, 96, 128]
+    path: model_parameters.DUALFloodGNN.hidden_features
+  num_layers:
+    type: categorical
+    choices: [3, 4, 5]
+    path: model_parameters.DUALFloodGNN.num_layers
+  mlp_layers:
+    type: categorical
+    choices: [2, 3]
+    path: model_parameters.DUALFloodGNN.mlp_layers
+  batch_size:
+    type: categorical
+    choices: [8, 16, 32]
+    path: training_parameters.batch_size
+  learning_rate:
+    type: float
+    min: 3.0e-5
+    max: 5.0e-4
+    log: true
+    path: training_parameters.learning_rate
+  gradient_clip_value:
+    type: categorical
+    choices: [0.25, 0.5, 1.0, 2.0]
+    path: training_parameters.gradient_clip_value
+  adam_weight_decay:
+    type: categorical
+    choices: [0.0, 1.0e-6, 1.0e-4]
+    path: training_parameters.adam_weight_decay
+  previous_timesteps:
+    type: categorical
+    choices: [1, 2, 3]
+    path: dataset_parameters.previous_timesteps
+  init_num_timesteps:
+    type: categorical
+    choices: [1, 2, 3]
+    path: training_parameters.autoregressive.init_num_timesteps
+  learning_rate_decay:
+    type: categorical
+    choices: [0.5, 0.7, 0.9]
+    path: training_parameters.autoregressive.learning_rate_decay
+  edge_loss_weight:
+    type: float
+    min: 0.25
+    max: 10.0
+    log: true
+    path: loss_func_parameters.edge_loss_weight

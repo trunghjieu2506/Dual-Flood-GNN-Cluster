@@ -370,6 +370,9 @@ class ClusterTrainer(DualAutoregressiveTrainer):
                     cluster_batch.global_mass_info['total_rainfall'] = full_batch.global_mass_info['total_rainfall'].sum(dim=0, keepdim=True)
 
                 if self.use_local_loss and hasattr(full_batch, 'local_mass_info'):
+                    # Slice the local mass metadata down to this cluster's nodes. The mask is
+                    # supplied by both dataset backends, but fall back to the graph-level mask
+                    # (and then to all-nodes) so an older cached dataset cannot crash training.
                     cluster_batch.local_mass_info = full_batch.local_mass_info.copy()
                     if 'non_boundary_nodes_mask' in full_batch.local_mass_info:
                         non_boundary_nodes_mask = full_batch.local_mass_info['non_boundary_nodes_mask'][subset].clone()

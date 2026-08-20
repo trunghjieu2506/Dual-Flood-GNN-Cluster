@@ -56,7 +56,15 @@ class NodeRegressionTester(BaseTester):
                 if self.include_physics_loss:
                     # Requires normalized prediction for physics-informed loss
                     prev_node_pred, prev_edge_pred = physics_utils.get_physics_info_node_edge(x, edge_attr, self.dataset.previous_timesteps, graph)
-                    validation_stats.update_physics_informed_stats_for_timestep(pred, prev_node_pred, prev_edge_pred, graph, TEST_LOCAL_MASS_LOSS_NODES)
+                    validation_stats.update_physics_informed_stats_for_timestep(
+                        pred,
+                        prev_node_pred,
+                        prev_edge_pred,
+                        graph,
+                        TEST_LOCAL_MASS_LOSS_NODES,
+                        include_global_mass_loss=self.include_global_mass_loss,
+                        include_local_mass_loss=self.include_local_mass_loss,
+                    )
 
                 label = x[:, [self.end_node_target_idx-1]] + graph.y
                 if self.dataset.is_normalized:

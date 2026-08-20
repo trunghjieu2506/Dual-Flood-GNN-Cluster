@@ -107,6 +107,9 @@ class AutomSWEGNNFloodEventDataset(mSWEGNNFloodEventDataset):
         return label_nodes, label_edges
 
     def _get_global_mass_info_for_timestep(self, node_rainfall_per_ts: ndarray, event_idx: int, timestep_idx: int) -> Dict[str, Tensor]:
+        # Note: unlike the HEC-RAS dataset this dict does not carry non_boundary_nodes_mask,
+        # which GlobalMassConservationLoss expects. Global mass loss is therefore not yet
+        # usable on mSWE-GNN data; all mSWE configs run with use_global_mass_loss: false.
         end_idx = timestep_idx + self.num_label_timesteps
         event_bc = self.boundary_conditions[event_idx]
         non_boundary_nodes_mask = ~event_bc.boundary_nodes_mask
@@ -123,6 +126,13 @@ class AutomSWEGNNFloodEventDataset(mSWEGNNFloodEventDataset):
         }
 
     def _get_local_mass_info_for_timestep(self, node_rainfall_per_ts: ndarray, event_idx: int, timestep_idx: int) -> Dict[str, Tensor]:
+        """Metadata the local mass-conservation loss needs for this timestep.
+
+        non_boundary_nodes_mask is required: LocalMassConservationLoss reads it out of
+        local_mass_info to drop boundary cells, whose inflow/outflow is imposed rather than
+        predicted. It is taken from this event's own boundary condition, since mSWE-GNN
+        events each have their own mesh and therefore their own boundary nodes.
+        """
         event_bc = self.boundary_conditions[event_idx]
         non_boundary_nodes_mask = torch.from_numpy(~event_bc.boundary_nodes_mask)
         end_ts = timestep_idx + self.num_label_timesteps

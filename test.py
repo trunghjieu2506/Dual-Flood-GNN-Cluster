@@ -24,14 +24,15 @@ def parse_args() -> Namespace:
 
 def get_test_dataset_config(base_datset_params: Dict, config: Dict) -> Dict:
     dataset_parameters = config['dataset_parameters']
+    loss_func_parameters = config.get('loss_func_parameters', {})
     test_dataset_parameters = dataset_parameters['testing']
     test_dataset_config = {
         **base_datset_params,
         'mode': 'test',
         'dataset_summary_file': test_dataset_parameters['dataset_summary_file'],
         'event_stats_file': test_dataset_parameters['event_stats_file'],
-        'with_global_mass_loss': True,
-        'with_local_mass_loss': True,
+        'with_global_mass_loss': loss_func_parameters.get('use_global_mass_loss', True),
+        'with_local_mass_loss': loss_func_parameters.get('use_local_mass_loss', True),
     }
     return test_dataset_config
 
@@ -42,8 +43,15 @@ def run_test(model: torch.nn.Module,
              rollout_start: int = 0,
              rollout_timesteps: Optional[int] = None,
              output_dir: Optional[str] = None,
-             device: str = 'cpu'):
-    log_test_config = {'rollout_start': rollout_start, 'rollout_timesteps': rollout_timesteps}
+             device: str = 'cpu',
+             include_global_mass_loss: bool = True,
+             include_local_mass_loss: bool = True):
+    log_test_config = {
+        'rollout_start': rollout_start,
+        'rollout_timesteps': rollout_timesteps,
+        'include_global_mass_loss': include_global_mass_loss,
+        'include_local_mass_loss': include_local_mass_loss,
+    }
     logger.log(f'Using testing configuration: {log_test_config}')
 
     tester_params = {
@@ -51,14 +59,19 @@ def run_test(model: torch.nn.Module,
         'dataset': dataset,
         'rollout_start': rollout_start,
         'rollout_timesteps': rollout_timesteps,
-        'include_physics_loss': True,
+        'include_global_mass_loss': include_global_mass_loss,
+        'include_local_mass_loss': include_local_mass_loss,
         'logger': logger,
         'device': device,
     }
 
-    if model.__class__.__name__ in NODE_EDGE_MODELS:
+    model_class_name = model.__class__.__name__
+    if hasattr(model, '_orig_mod'):
+        model_class_name = model._orig_mod.__class__.__name__
+
+    if model_class_name in NODE_EDGE_MODELS:
         tester = DualAutoregressiveTester(**tester_params)
-    elif model.__class__.__name__ in EDGE_MODELS:
+    elif model_class_name in EDGE_MODELS:
         tester = EdgeAutoregressiveTester(**tester_params)
     else:
         tester = NodeAutoregressiveTester(**tester_params)
@@ -92,19 +105,24 @@ def main():
 
         # Dataset
         dataset_parameters = config['dataset_parameters']
+        dataset_type = dataset_parameters.get('dataset_type', 'hecras')
         base_datset_config = {
             'root_dir': dataset_parameters['root_dir'],
-            'nodes_shp_file': dataset_parameters['nodes_shp_file'],
-            'edges_shp_file': dataset_parameters['edges_shp_file'],
             'features_stats_file': dataset_parameters['features_stats_file'],
             'previous_timesteps': dataset_parameters['previous_timesteps'],
             'normalize': dataset_parameters['normalize'],
+            'boundary_aware_features': dataset_parameters.get('boundary_aware_features', False),
+            'boundary_aware_feature_groups': dataset_parameters.get('boundary_aware_feature_groups', None),
+            'boundary_aware_cache_prefix': dataset_parameters.get('boundary_aware_cache_prefix', None),
             'timestep_interval': dataset_parameters['timestep_interval'],
             'spin_up_time': dataset_parameters['spin_up_time'],
             'time_from_peak': dataset_parameters['time_from_peak'],
-            'inflow_boundary_nodes': dataset_parameters['inflow_boundary_nodes'],
-            'outflow_boundary_nodes': dataset_parameters['outflow_boundary_nodes'],
+            'inflow_boundary_nodes': dataset_parameters.get('inflow_boundary_nodes', []),
+            'outflow_boundary_nodes': dataset_parameters.get('outflow_boundary_nodes', []),
         }
+        if dataset_type != 'mswegnn':
+            base_datset_config['nodes_shp_file'] = dataset_parameters['nodes_shp_file']
+            base_datset_config['edges_shp_file'] = dataset_parameters['edges_shp_file']
         base_datset_config = get_test_dataset_config(base_datset_config, config)
         logger.log(f'Using dataset configuration: {base_datset_config}')
         dataset_config = {
@@ -115,8 +133,16 @@ def main():
         }
 
         storage_mode = dataset_parameters['storage_mode']
-        dataset = dataset_factory(storage_mode=storage_mode, autoregressive=False, **dataset_config)
+        dataset = dataset_factory(storage_mode=storage_mode, autoregressive=False, dataset_type=dataset_type, **dataset_config)
         logger.log(f'Loaded dataset with {len(dataset)} samples')
+        logger.log(
+            'Dataset feature dimensions: '
+            f'static_node={dataset.num_static_node_features}, '
+            f'dynamic_node={dataset.num_dynamic_node_features}, '
+            f'static_edge={dataset.num_static_edge_features}, '
+            f'dynamic_edge={dataset.num_dynamic_edge_features}, '
+            f'boundary_aware_features={dataset_parameters.get("boundary_aware_features", False)}'
+        )
 
         # Load model
         model_params = config['model_parameters'][args.model]
@@ -139,6 +165,12 @@ def main():
         rollout_start = test_config['rollout_start']
         rollout_timesteps = test_config['rollout_timesteps']
         output_dir = test_config['output_dir']
+        include_global_mass_loss = bool(
+            config.get('loss_func_parameters', {}).get('use_global_mass_loss', True)
+        )
+        include_local_mass_loss = bool(
+            config.get('loss_func_parameters', {}).get('use_local_mass_loss', True)
+        )
         run_test(model=model,
                  model_path=args.model_path,
                  dataset=dataset,
@@ -146,7 +178,9 @@ def main():
                  rollout_start=rollout_start,
                  rollout_timesteps=rollout_timesteps,
                  output_dir=output_dir,
-                 device=args.device)
+                 device=args.device,
+                 include_global_mass_loss=include_global_mass_loss,
+                 include_local_mass_loss=include_local_mass_loss)
 
         logger.log('================================================')
     except Exception:

@@ -106,7 +106,69 @@ def init_wandb_run(args: Namespace, config: Dict, logger: Logger):
     return run
 
 
-def log_regression_metrics_to_wandb(wandb_run, output_json: str, logger: Logger):
+def log_test_metrics_to_wandb(wandb_run, metrics_dir: str, logger: Logger, metrics_prefix: str = None):
+    """Aggregate the per-event test .npz files into test/mean_* and test/std_* metrics.
+
+    Key names match dual_flood_gnn/train.py so cluster runs and single-mesh runs are
+    directly comparable in W&B. Mass-conservation losses are summed and taken absolute
+    per event (signed values cancel); everything else is averaged over timesteps.
+    """
+    if wandb_run is None or not metrics_dir or not os.path.isdir(metrics_dir):
+        return
+
+    metric_keys = [
+        "rmse", "rmse_flooded", "mae", "mae_flooded", "nse", "nse_flooded", "csi",
+        "edge_rmse", "edge_mae", "edge_nse", "global_mass_loss", "local_mass_loss",
+        "inference_time",
+    ]
+    event_rows = []
+    for filename in os.listdir(metrics_dir):
+        if not filename.endswith(".npz"):
+            continue
+        if metrics_prefix and not filename.startswith(metrics_prefix):
+            continue
+        path = os.path.join(metrics_dir, filename)
+        try:
+            data = np.load(path)
+            row = {}
+            for key in metric_keys:
+                if key not in data.files:
+                    continue
+                arr = np.asarray(data[key])
+                if arr.size == 0:
+                    continue
+                if arr.shape == ():
+                    row[key] = float(arr)
+                elif key in {"global_mass_loss", "local_mass_loss"}:
+                    row[key] = float(abs(np.sum(arr)))
+                else:
+                    row[key] = float(np.mean(arr))
+            if row:
+                event_rows.append(row)
+        except Exception as exc:
+            logger.log(f"Warning: failed to read test metrics for W&B from {path}: {exc}")
+
+    if not event_rows:
+        return
+
+    summary = {}
+    for key in metric_keys:
+        values = [row[key] for row in event_rows if key in row]
+        if values:
+            summary[f"test/mean_{key}"] = float(np.mean(values))
+            summary[f"test/std_{key}"] = float(np.std(values))
+    summary["test/event_count"] = len(event_rows)
+
+    try:
+        wandb_run.log(summary)
+        for key, value in summary.items():
+            wandb_run.summary[key] = value
+        logger.log(f"Logged aggregated test metrics from {len(event_rows)} events to W&B.")
+    except Exception as exc:
+        logger.log(f"Warning: failed to log test metrics to W&B: {exc}")
+
+
+def log_summary_json_to_wandb(wandb_run, output_json: str, logger: Logger):
     if wandb_run is None:
         return
 
@@ -114,7 +176,7 @@ def log_regression_metrics_to_wandb(wandb_run, output_json: str, logger: Logger)
         with open(output_json, "r") as f:
             payload = json.load(f)
     except Exception as exc:
-        logger.log(f"Warning: failed to read regression metrics JSON for W&B logging: {exc}")
+        logger.log(f"Warning: failed to read summary metrics JSON for W&B logging: {exc}")
         return
 
     wandb_metrics = {}
@@ -131,9 +193,9 @@ def log_regression_metrics_to_wandb(wandb_run, output_json: str, logger: Logger)
         wandb_run.log(wandb_metrics)
         for key, value in wandb_metrics.items():
             wandb_run.summary[key] = value
-        logger.log(f"Logged {len(wandb_metrics)} final regression metrics to W&B.")
+        logger.log(f"Logged {len(wandb_metrics)} standardized summary metrics to W&B.")
     except Exception as exc:
-        logger.log(f"Warning: failed to log final regression metrics to W&B: {exc}")
+        logger.log(f"Warning: failed to log standardized summary metrics to W&B: {exc}")
 
 
 def collect_regression_metrics(args: Namespace, config: Dict, logger: Logger, metrics_dir: str, wandb_run=None, metrics_glob: str | None = None):
@@ -184,7 +246,7 @@ def collect_regression_metrics(args: Namespace, config: Dict, logger: Logger, me
         logger.log(f"Collecting regression metrics into: {output_csv}")
 
     subprocess.run(cmd, check=True)
-    log_regression_metrics_to_wandb(wandb_run, output_json, logger)
+    log_summary_json_to_wandb(wandb_run, output_json, logger)
 
 
 def get_dataset_type(config: Dict) -> str:
@@ -650,6 +712,8 @@ def main():
                                amp_mode=args.amp,
                                fused_adam=args.fused_adam,
                                wandb_run=wandb_run)
+        if wandb_run is not None:
+            wandb_run.summary['model_path'] = model_path
 
         logger.log('================================================')
 
@@ -710,9 +774,10 @@ def main():
                  device=args.device,
                  include_global_mass_loss=include_global_mass_loss,
                  include_local_mass_loss=include_local_mass_loss)
+        metrics_prefix = os.path.splitext(os.path.basename(model_path))[0]
+        log_test_metrics_to_wandb(wandb_run, output_dir, logger, metrics_prefix=metrics_prefix)
         if args.collect_regression_metrics:
-            model_filename = os.path.splitext(os.path.basename(model_path))[0]
-            metrics_glob = f"{model_filename}_runid_*_test_metrics.npz"
+            metrics_glob = f"{metrics_prefix}_runid_*_test_metrics.npz"
             collect_regression_metrics(args, config, logger, output_dir, wandb_run=wandb_run, metrics_glob=metrics_glob)
 
         logger.log('================================================')

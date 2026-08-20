@@ -35,6 +35,8 @@ class ValidationStats:
         self.mae_list = []
         self.nse_list = []
         self.csi_list = []
+        self.depth_rmse_list = []
+        self.depth_mae_list = []
 
         # Flooded cell stats
         self.rmse_flooded_list = []
@@ -76,8 +78,26 @@ class ValidationStats:
     def get_avg_rmse(self) -> float:
         return float(np.mean(self.rmse_list))
 
+    def get_avg_mae(self) -> float:
+        return float(np.mean(self.mae_list))
+
+    def get_avg_nse(self) -> float:
+        return float(np.mean(self.nse_list))
+
     def get_avg_edge_rmse(self) -> float:
         return float(np.mean(self.edge_rmse_list))
+
+    def get_avg_depth_rmse(self) -> float:
+        return float(np.mean(self.depth_rmse_list)) if self.depth_rmse_list else self.get_avg_rmse()
+
+    def get_avg_depth_mae(self) -> float:
+        return float(np.mean(self.depth_mae_list)) if self.depth_mae_list else self.get_avg_mae()
+
+    def get_avg_edge_mae(self) -> float:
+        return float(np.mean(self.edge_mae_list))
+
+    def get_avg_edge_nse(self) -> float:
+        return float(np.mean(self.edge_nse_list))
 
     def get_total_global_mass_loss(self) -> float:
         return float(np.sum(self.global_mass_loss_list))
@@ -129,36 +149,46 @@ class ValidationStats:
         self.edge_mae_list.append(MAE(edge_pred, edge_target))
         self.edge_nse_list.append(NSE(edge_pred, edge_target))
 
+    # Depth-space errors, tracked alongside the raw target-space ones so volume-target
+    # runs can still be reported and compared in metres.
+    def update_depth_stats_for_timestep(self, depth_pred: Tensor, depth_target: Tensor):
+        self.depth_rmse_list.append(RMSE(depth_pred, depth_target))
+        self.depth_mae_list.append(MAE(depth_pred, depth_target))
+
     def update_physics_informed_stats_for_timestep(self,
                                                    pred: Tensor,
                                                    prev_node_pred: Tensor,
                                                    prev_edge_pred: Tensor,
                                                    databatch,
-                                                   local_mass_nodes: List[int] = None):
+                                                   local_mass_nodes: List[int] = None,
+                                                   include_global_mass_loss: bool = True,
+                                                   include_local_mass_loss: bool = True):
         assert self.normalizer is not None and self.is_normalized is not None and self.delta_t is not None, \
             "normalizer, is_normalized, and delta_t must be set before updating physics-informed stats."
 
-        global_mass_loss_func = GlobalMassConservationLoss(mode='test',
-                                                           normalizer=self.normalizer,
-                                                           is_normalized=self.is_normalized,
-                                                           delta_t=self.delta_t)
-        total_rainfall = physics_utils.get_total_rainfall(databatch)
-        global_mass_loss = global_mass_loss_func(pred, prev_node_pred, prev_edge_pred, total_rainfall, databatch)
-        self.global_mass_loss_list.append(global_mass_loss.cpu().item())
+        if include_global_mass_loss:
+            global_mass_loss_func = GlobalMassConservationLoss(mode='test',
+                                                               normalizer=self.normalizer,
+                                                               is_normalized=self.is_normalized,
+                                                               delta_t=self.delta_t)
+            total_rainfall = physics_utils.get_total_rainfall(databatch)
+            global_mass_loss = global_mass_loss_func(pred, prev_node_pred, prev_edge_pred, total_rainfall, databatch)
+            self.global_mass_loss_list.append(global_mass_loss.cpu().item())
 
-        local_mass_loss_func = LocalMassConservationLoss(mode='test',
-                                                         normalizer=self.normalizer,
-                                                         is_normalized=self.is_normalized,
-                                                         delta_t=self.delta_t)
-        rainfall = physics_utils.get_rainfall(databatch)
-        local_nodes_mask = None
-        if local_mass_nodes is not None:
-            # Only compute local mass loss for specific nodes
-            assert databatch.num_graphs == 1, 'For testing, assume there is only one graph per batch.'
-            local_nodes_mask = np.isin(np.arange(databatch.num_nodes), local_mass_nodes)
+        if include_local_mass_loss:
+            local_mass_loss_func = LocalMassConservationLoss(mode='test',
+                                                             normalizer=self.normalizer,
+                                                             is_normalized=self.is_normalized,
+                                                             delta_t=self.delta_t)
+            rainfall = physics_utils.get_rainfall(databatch)
+            local_nodes_mask = None
+            if local_mass_nodes is not None:
+                # Only compute local mass loss for specific nodes
+                assert databatch.num_graphs == 1, 'For testing, assume there is only one graph per batch.'
+                local_nodes_mask = np.isin(np.arange(databatch.num_nodes), local_mass_nodes)
 
-        local_mass_loss = local_mass_loss_func(pred, prev_node_pred, prev_edge_pred, rainfall, databatch, local_nodes_mask)
-        self.local_mass_loss_list.append(local_mass_loss.cpu().item())
+            local_mass_loss = local_mass_loss_func(pred, prev_node_pred, prev_edge_pred, rainfall, databatch, local_nodes_mask)
+            self.local_mass_loss_list.append(local_mass_loss.cpu().item())
 
     def print_stats_summary(self):
         if len(self.rmse_list) > 0:
@@ -166,11 +196,15 @@ class ValidationStats:
         if len(self.rmse_flooded_list) > 0:
             self.log(f'Average RMSE (flooded): {np.mean(self.rmse_flooded_list):.4e}')
         if len(self.mae_list) > 0:
-            self.log(f'Average MAE: {np.mean(self.mae_list):.4e}')
+            self.log(f'Average MAE: {self.get_avg_mae():.4e}')
+        if len(self.depth_rmse_list) > 0:
+            self.log(f'Average Depth RMSE: {self.get_avg_depth_rmse():.4e}')
+        if len(self.depth_mae_list) > 0:
+            self.log(f'Average Depth MAE: {self.get_avg_depth_mae():.4e}')
         if len(self.mae_flooded_list) > 0:
             self.log(f'Average MAE (flooded): {np.mean(self.mae_flooded_list):.4e}')
         if len(self.nse_list) > 0:
-            self.log(f'Average NSE: {np.mean(self.nse_list):.4e}')
+            self.log(f'Average NSE: {self.get_avg_nse():.4e}')
         if len(self.nse_flooded_list) > 0:
             self.log(f'Average NSE (flooded): {np.mean(self.nse_flooded_list):.4e}')
         if len(self.csi_list) > 0:
@@ -181,11 +215,11 @@ class ValidationStats:
         if len(self.edge_rmse_flooded_list) > 0:
             self.log(f'Average Edge RMSE (flooded): {np.mean(self.edge_rmse_flooded_list):.4e}')
         if len(self.edge_mae_list) > 0:
-            self.log(f'Average Edge MAE: {np.mean(self.edge_mae_list):.4e}')
+            self.log(f'Average Edge MAE: {self.get_avg_edge_mae():.4e}')
         if len(self.edge_mae_flooded_list) > 0:
             self.log(f'Average Edge MAE (flooded): {np.mean(self.edge_mae_flooded_list):.4e}')
         if len(self.edge_nse_list) > 0:
-            self.log(f'Average Edge NSE: {np.mean(self.edge_nse_list):.4e}')
+            self.log(f'Average Edge NSE: {self.get_avg_edge_nse():.4e}')
         if len(self.edge_nse_flooded_list) > 0:
             self.log(f'Average Edge NSE (flooded): {np.mean(self.edge_nse_flooded_list):.4e}')
 
@@ -212,6 +246,8 @@ class ValidationStats:
             'rmse': np.array(self.rmse_list),
             'rmse_flooded': np.array(self.rmse_flooded_list),
             'mae': np.array(self.mae_list),
+            'depth_rmse': np.array(self.depth_rmse_list),
+            'depth_mae': np.array(self.depth_mae_list),
             'mae_flooded': np.array(self.mae_flooded_list),
             'nse': np.array(self.nse_list),
             'nse_flooded': np.array(self.nse_flooded_list),

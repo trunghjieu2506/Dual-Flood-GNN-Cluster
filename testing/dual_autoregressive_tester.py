@@ -12,8 +12,8 @@ class DualAutoregressiveTester(BaseTester):
         super().__init__(*args, **kwargs)
 
     def test(self):
-        for event_idx, run_id in enumerate(self.dataset.hec_ras_run_ids):
-            self.log(f'Validating on run {event_idx + 1}/{len(self.dataset.hec_ras_run_ids)} with Run ID {run_id}')
+        for event_idx, run_id in enumerate(self.event_run_ids):
+            self.log(f'Validating on run {event_idx + 1}/{len(self.event_run_ids)} with Run ID {run_id}')
 
             validation_stats = ValidationStats(logger=self.logger,
                                                 normalizer=self.dataset.normalizer,
@@ -23,11 +23,20 @@ class DualAutoregressiveTester(BaseTester):
             validation_stats.print_stats_summary()
             self.events_validation_stats.append(validation_stats)
 
-        self.log(f'Average Node RMSE across events: {self.get_avg_node_rmse():.4e}')
-        self.log(f'Average Edge RMSE across events: {self.get_avg_edge_rmse():.4e}')
+        self.log(f'Average NODE METRICS across events:')
+        self.log(f'\tRMSE: {self.get_avg_node_rmse():.4e}')
+        self.log(f'\tMAE: {self.get_avg_node_mae():.4e}')
+        self.log(f'\tNSE: {self.get_avg_node_nse():.4e}')
+
+        self.log(f'Average EDGE METRICS across events:')
+        self.log(f'\tRMSE: {self.get_avg_edge_rmse():.4e}')
+        self.log(f'\tMAE: {self.get_avg_edge_mae():.4e}')
+        self.log(f'\tNSE: {self.get_avg_edge_nse():.4e}')
+
         if self.include_physics_loss:
-            self.log(f'Average Global Mass Conservation Loss across events: {self.get_avg_global_mass_loss():.4e}')
-            self.log(f'Average Local Mass Conservation Loss across events: {self.get_avg_local_mass_loss():.4e}')
+            self.log('PHYSICS-BASED METRICS across events:')
+            self.log(f'\tAverage Absolute Global Mass Conservation Loss: {self.get_avg_abs_global_mass_loss():.4e}')
+            self.log(f'\tAverage Absolute Local Mass Conservation Loss: {self.get_avg_abs_local_mass_loss():.4e}')
 
     def run_test_for_event(self, event_idx: int, validation_stats: ValidationStats):
         validation_stats.start_validate()
@@ -39,7 +48,7 @@ class DualAutoregressiveTester(BaseTester):
                 event_end_idx = event_start_idx + self.rollout_timesteps
                 dataset_event_length = self.dataset.event_start_idx[event_idx + 1] if event_idx + 1 < len(self.dataset.event_start_idx) else self.dataset.total_rollout_timesteps
                 assert event_end_idx <= dataset_event_length, \
-                    f'Rollout length {event_end_idx} exceeds event length {dataset_event_length} for event {self.dataset.hec_ras_run_ids[event_idx]}.'
+                    f'Rollout length {event_end_idx} exceeds event length {dataset_event_length} for event {self.event_run_ids[event_idx]}.'
             event_dataset = self.dataset[event_start_idx:event_end_idx]
             dataloader = DataLoader(event_dataset, batch_size=1, shuffle=False) # Enforce batch size = 1 for autoregressive testing
 
@@ -55,9 +64,12 @@ class DualAutoregressiveTester(BaseTester):
 
                 pred_diff, edge_pred_diff = self.model(x, edge_index, edge_attr)
 
+                boundary_nodes_mask = self._get_graph_boundary_nodes_mask(graph)
+                boundary_edges_mask = self._get_graph_boundary_edges_mask(graph)
+
                 # Override boundary conditions in predictions
-                pred_diff[self.boundary_nodes_mask] = graph.y[self.boundary_nodes_mask]
-                edge_pred_diff[self.boundary_edges_mask] = graph.y_edge[self.boundary_edges_mask]
+                pred_diff[boundary_nodes_mask] = graph.y[boundary_nodes_mask]
+                edge_pred_diff[boundary_edges_mask] = graph.y_edge[boundary_edges_mask]
 
                 prev_node_pred = sliding_window[:, [-1]]
                 pred = prev_node_pred + pred_diff
@@ -66,7 +78,15 @@ class DualAutoregressiveTester(BaseTester):
 
                 if self.include_physics_loss:
                     # Requires normalized prediction for physics-informed loss
-                    validation_stats.update_physics_informed_stats_for_timestep(pred, prev_node_pred, prev_edge_pred, graph, TEST_LOCAL_MASS_LOSS_NODES)
+                    validation_stats.update_physics_informed_stats_for_timestep(
+                        pred,
+                        prev_node_pred,
+                        prev_edge_pred,
+                        graph,
+                        TEST_LOCAL_MASS_LOSS_NODES,
+                        include_global_mass_loss=self.include_global_mass_loss,
+                        include_local_mass_loss=self.include_local_mass_loss,
+                    )
 
                 sliding_window = torch.concat((sliding_window[:, 1:], pred), dim=1)
                 edge_sliding_window = torch.concat((edge_sliding_window[:, 1:], edge_pred), dim=1)
@@ -81,13 +101,18 @@ class DualAutoregressiveTester(BaseTester):
                 label = torch.clip(label, min=0)
 
                 # Filter boundary conditions for metric computation
-                pred = pred[self.non_boundary_nodes_mask]
-                label = label[self.non_boundary_nodes_mask]
+                non_boundary_nodes_mask = ~boundary_nodes_mask
+                depth_pred = self._node_target_to_depth(graph, pred, non_boundary_nodes_mask)
+                depth_label = self._node_target_to_depth(graph, label, non_boundary_nodes_mask)
+                pred = pred[non_boundary_nodes_mask]
+                label = label[non_boundary_nodes_mask]
 
+                threshold_per_cell = self._get_cell_thresholds(graph, non_boundary_nodes_mask)
                 validation_stats.update_stats_for_timestep(pred.cpu(),
                                                            label.cpu(),
-                                                           water_threshold=self.threshold_per_cell,
+                                                           water_threshold=threshold_per_cell.cpu(),
                                                            timestamp=graph.timestep if hasattr(graph, 'timestep') else None)
+                validation_stats.update_depth_stats_for_timestep(depth_pred.cpu(), depth_label.cpu())
 
                 label_edge = graph.edge_attr[:, [self.end_edge_target_idx-1]] + graph.y_edge
                 if self.dataset.is_normalized:

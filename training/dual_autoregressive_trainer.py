@@ -24,6 +24,36 @@ class DualAutoregressiveTrainer(NodeAutoregressiveTrainer, EdgeAutoregressiveTra
         self.edge_loss_weight = edge_loss_weight
         self.edge_loss_scaler = LossScaler(initial_scale=edge_pred_loss_scale)
 
+    def _node_target_to_depth(self, graph, values: Tensor, non_boundary_nodes_mask: Tensor) -> Tensor:
+        ds = self.val_dataset if self.val_dataset is not None else self.dataset
+        if ds.NODE_TARGET_FEATURE == 'water_depth':
+            return values[non_boundary_nodes_mask]
+        if ds.NODE_TARGET_FEATURE != 'water_volume' or 'area' not in ds.STATIC_NODE_FEATURES:
+            return values[non_boundary_nodes_mask]
+
+        area_nodes_idx = ds.STATIC_NODE_FEATURES.index('area')
+        area = graph.x[:, area_nodes_idx].clone()
+        if ds.is_normalized:
+            area = ds.normalizer.denormalize('area', area)
+        area = torch.clamp(area[non_boundary_nodes_mask, None], min=1e-12)
+        return values[non_boundary_nodes_mask] / area
+
+    def _edge_target_to_unit_discharge(self, graph, values: Tensor) -> Tensor:
+        """Convert face flow (m3/s) to unit discharge q (m2/s) by dividing by face length,
+        matching the edge quantity the mSWE-GNN paper reports."""
+        ds = self.val_dataset if self.val_dataset is not None else self.dataset
+        if getattr(ds, 'EDGE_TARGET_FEATURE', None) == 'unit_discharge':
+            return values
+        if getattr(ds, 'EDGE_TARGET_FEATURE', None) != 'face_flow' or 'face_length' not in ds.STATIC_EDGE_FEATURES:
+            return values
+
+        face_length_idx = ds.STATIC_EDGE_FEATURES.index('face_length')
+        face_length = graph.edge_attr[:, face_length_idx].clone()
+        if ds.is_normalized:
+            face_length = ds.normalizer.denormalize('face_length', face_length)
+        face_length = torch.clamp(face_length[:, None], min=1e-12)
+        return values / face_length
+
     def train(self):
         '''Multi-step-ahead loss with curriculum learning.'''
         self.training_stats.start_train()
@@ -53,22 +83,57 @@ class DualAutoregressiveTrainer(NodeAutoregressiveTrainer, EdgeAutoregressiveTra
 
             train_end_time = time.time()
             train_duration = train_end_time - train_start_time
+            self.training_stats.add_loss_component('epoch_train_duration_s', train_duration)
             self.training_stats.log(f'\tEpoch Train Duration: {train_duration:.2f} seconds')
+            train_metrics = {
+                'train/loss': float(epoch_loss),
+                'train/node_prediction_loss': float(pred_epoch_loss),
+                'train/edge_prediction_loss': float(edge_pred_epoch_loss),
+                'train/epoch_duration_s': float(train_duration),
+                'train/current_num_timesteps': float(current_num_timesteps),
+            }
+            if self.use_global_loss:
+                train_metrics['train/global_physics_loss'] = float(global_mass_epoch_loss)
+            if self.use_local_loss:
+                train_metrics['train/local_physics_loss'] = float(local_mass_epoch_loss)
+            self.training_stats.log_metrics(train_metrics, step=epoch + 1)
 
             val_node_rmse, val_edge_rmse = self.validate()
             self.training_stats.log(f'\n\tValidation Node RMSE: {val_node_rmse:.4e}')
             self.training_stats.log(f'\tValidation Edge RMSE: {val_edge_rmse:.4e}')
             self.training_stats.add_val_loss_component('val_node_rmse', val_node_rmse)
             self.training_stats.add_val_loss_component('val_edge_rmse', val_edge_rmse)
+            val_metrics = {
+                'val/node_rmse': float(val_node_rmse),
+                'val/edge_rmse': float(val_edge_rmse),
+            }
+            val_component_names = {
+                'val_node_loss': 'val/node_loss',
+                'val_edge_loss': 'val/edge_loss',
+                'val_node_depth_rmse': 'val/node_depth_rmse',
+                'val_node_depth_mae': 'val/node_depth_mae',
+                'val_global_mass_loss': 'val/global_mass_loss',
+                'val_local_mass_loss': 'val/local_mass_loss',
+            }
+            for component_key, metric_key in val_component_names.items():
+                values = self.training_stats.epoch_val_loss_components.get(component_key)
+                if values:
+                    val_metrics[metric_key] = float(values[-1])
+            if 'val/node_depth_rmse' in val_metrics:
+                self.training_stats.log(f'\tValidation Depth RMSE: {val_metrics["val/node_depth_rmse"]:.4e}')
+            if 'val/node_depth_mae' in val_metrics:
+                self.training_stats.log(f'\tValidation Depth MAE: {val_metrics["val/node_depth_mae"]:.4e}')
+            self.training_stats.log_metrics(val_metrics, step=epoch + 1)
 
             current_timestep_epochs += 1
 
-            is_early_stopped = self.early_stopping((val_node_rmse, val_edge_rmse), self.model)
+            early_stop_node_metric = val_metrics.get('val/node_depth_rmse', val_node_rmse)
+            is_early_stopped = self.early_stopping((early_stop_node_metric, val_edge_rmse), self.model)
             is_max_exceeded = self.max_curriculum_epochs is not None and current_timestep_epochs >= self.max_curriculum_epochs
             if is_early_stopped or is_max_exceeded:
                 if current_num_timesteps < self.total_num_timesteps:
                     self.training_stats.log(f'\tCurriculum learning for {current_num_timesteps} steps ended after {current_timestep_epochs} epochs.')
-                    current_num_timesteps += self.timestep_increment
+                    current_num_timesteps = min(current_num_timesteps + self.timestep_increment, self.total_num_timesteps)
                     current_timestep_epochs = 0
                     self.early_stopping = EarlyStopping(patience=self.early_stopping.patience)
                     self.training_stats.log(f'\tIncreased current_num_timesteps to {current_num_timesteps} timesteps.')
@@ -105,7 +170,8 @@ class DualAutoregressiveTrainer(NodeAutoregressiveTrainer, EdgeAutoregressiveTra
 
             sliding_window = x[:, self.start_node_target_idx:self.end_node_target_idx].clone()
             edge_sliding_window = edge_attr[:, self.start_edge_target_idx:self.end_edge_target_idx].clone()
-            for i in range(current_num_timesteps):
+            actual_num_timesteps = min(current_num_timesteps, batch.x.shape[2] if hasattr(batch, 'x') else current_num_timesteps)
+            for i in range(actual_num_timesteps):
                 x, edge_attr = batch.x[:, :, i], batch.edge_attr[:, :, i]
 
                 # Override graph data with sliding window
@@ -147,13 +213,13 @@ class DualAutoregressiveTrainer(NodeAutoregressiveTrainer, EdgeAutoregressiveTra
                     sliding_window = next_sliding_window
                     edge_sliding_window = next_edge_sliding_window
 
-            avg_batch_loss = total_batch_loss / current_num_timesteps
+            avg_batch_loss = total_batch_loss / actual_num_timesteps if actual_num_timesteps > 0 else 0
             avg_batch_loss.backward()
             self._clip_gradients()
             self.optimizer.step()
 
             total_losses = (total_batch_pred_loss, total_batch_edge_pred_loss, total_batch_global_mass_loss, total_batch_local_mass_loss)
-            avg_losses = train_utils.divide_losses(total_losses, current_num_timesteps)
+            avg_losses = train_utils.divide_losses(total_losses, actual_num_timesteps if actual_num_timesteps > 0 else 1)
             avg_pred_loss, avg_edge_pred_loss, avg_global_mass_loss, avg_local_mass_loss = avg_losses
             running_pred_loss += avg_pred_loss
             running_edge_pred_loss += avg_edge_pred_loss
@@ -171,7 +237,7 @@ class DualAutoregressiveTrainer(NodeAutoregressiveTrainer, EdgeAutoregressiveTra
         self.model.eval()
 
         event_node_loss_list, event_edge_loss_list, event_global_loss_list, event_local_loss_list = [], [], [], []
-        event_node_rmse_list, event_edge_rmse_list = [], []
+        event_node_rmse_list, event_node_depth_rmse_list, event_node_depth_mae_list, event_edge_rmse_list = [], [], [], []
 
         epoch = self.num_epochs_dyn_loss + 1
         non_boundary_nodes_mask = ~self.boundary_nodes_mask
@@ -184,7 +250,7 @@ class DualAutoregressiveTrainer(NodeAutoregressiveTrainer, EdgeAutoregressiveTra
                 dataloader = DataLoader(event_dataset, batch_size=1, shuffle=False) # Enforce batch size = 1 for autoregressive testing
 
                 node_loss_list, edge_loss_list, global_loss_list, local_loss_list = [], [], [], []
-                node_rmse_list, edge_rmse_list = [], []
+                node_rmse_list, node_depth_rmse_list, node_depth_mae_list, edge_rmse_list = [], [], [], []
 
                 sliding_window = event_dataset[0].x[:, self.start_node_target_idx:self.end_node_target_idx].clone()
                 edge_sliding_window = event_dataset[0].edge_attr[:, self.start_edge_target_idx:self.end_edge_target_idx].clone()
@@ -240,11 +306,15 @@ class DualAutoregressiveTrainer(NodeAutoregressiveTrainer, EdgeAutoregressiveTra
                     label = torch.clip(label, min=0)
 
                     # Filter boundary conditions for metric computation
+                    depth_pred = self._node_target_to_depth(graph, pred, non_boundary_nodes_mask)
+                    depth_label = self._node_target_to_depth(graph, label, non_boundary_nodes_mask)
                     pred = pred[non_boundary_nodes_mask]
                     label = label[non_boundary_nodes_mask]
 
                     node_rmse = metric_utils.RMSE(pred.cpu(), label.cpu())
                     node_rmse_list.append(node_rmse)
+                    node_depth_rmse_list.append(metric_utils.RMSE(depth_pred.cpu(), depth_label.cpu()))
+                    node_depth_mae_list.append(metric_utils.MAE(depth_pred.cpu(), depth_label.cpu()))
 
                     label_edge = graph.edge_attr[:, [self.end_edge_target_idx-1]] + graph.y_edge
                     if ds.is_normalized:
@@ -263,6 +333,8 @@ class DualAutoregressiveTrainer(NodeAutoregressiveTrainer, EdgeAutoregressiveTra
                     event_local_loss_list.append(torch.stack(local_loss_list).mean())
 
                 event_node_rmse_list.append(torch.stack(node_rmse_list).mean())
+                event_node_depth_rmse_list.append(torch.stack(node_depth_rmse_list).mean())
+                event_node_depth_mae_list.append(torch.stack(node_depth_mae_list).mean())
                 event_edge_rmse_list.append(torch.stack(edge_rmse_list).mean())
 
         # Store training losses for validation
@@ -280,7 +352,11 @@ class DualAutoregressiveTrainer(NodeAutoregressiveTrainer, EdgeAutoregressiveTra
             self.training_stats.add_val_loss_component('val_local_mass_loss', avg_local_loss)
 
         node_rmse = torch.stack(event_node_rmse_list).mean().item()
+        node_depth_rmse = torch.stack(event_node_depth_rmse_list).mean().item()
+        node_depth_mae = torch.stack(event_node_depth_mae_list).mean().item()
         edge_rmse = torch.stack(event_edge_rmse_list).mean().item()
+        self.training_stats.add_val_loss_component('val_node_depth_rmse', node_depth_rmse)
+        self.training_stats.add_val_loss_component('val_node_depth_mae', node_depth_mae)
 
         return node_rmse, edge_rmse
 

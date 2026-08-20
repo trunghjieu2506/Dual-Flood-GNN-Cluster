@@ -1,0 +1,159 @@
+dataset_parameters:
+  boundary_aware_cache_prefix: boundary_aware_
+  boundary_aware_feature_groups:
+    edge_bc_flow: true
+    edge_boundary_normals: true
+    edge_type_flags: true
+    node_distances: true
+    node_type_flags: true
+  boundary_aware_features: true
+  dataset_type: mswegnn
+  features_stats_file: boundary_aware_features_stats.yaml
+  inflow_boundary_nodes: []
+  normalize: true
+  outflow_boundary_nodes: []
+  previous_timesteps: 1
+  root_dir: data_mswegnn/datasets
+  spin_up_time: 0
+  storage_mode: memory
+  testing:
+    dataset_summary_file: test.csv
+    event_stats_file: boundary_aware_test_event_stats.yaml
+  time_from_peak: null
+  timestep_interval: 7200
+  training:
+    dataset_summary_file: train.csv
+    event_stats_file: boundary_aware_train_event_stats.yaml
+  validation_storage_mode: disk
+loss_func_parameters:
+  edge_loss: mse
+  edge_loss_weight: 0.4706
+  edge_pred_loss_scale: 3.0
+  global_mass_loss_scale: 1.4e-09
+  global_mass_loss_weight: 0.01
+  huber:
+    delta: 0.15
+  local_mass_loss_scale: 1.19e-09
+  local_mass_loss_weight: 0.01
+  node_loss: mse
+  node_loss_weight: 1.0
+  use_global_mass_loss: false
+  use_local_mass_loss: false
+model_parameters:
+  DUALFloodGNN:
+    activation: relu
+    decoder_activation: relu
+    decoder_layers: 3
+    encoder_activation: relu
+    encoder_layers: 3
+    hidden_features: 256
+    mlp_layers: 2
+    num_layers: 4
+    residual: true
+  EdgeGAT:
+    activation: relu
+    add_self_loops: true
+    attn_bias: true
+    attn_residual: true
+    decoder_activation: relu
+    decoder_layers: 3
+    dropout: 0.0
+    encoder_activation: relu
+    encoder_layers: 0
+    hidden_features: 64
+    negative_slope: 0.2
+    num_heads: 1
+    num_layers: 3
+    residual: false
+    use_edge_features: true
+  EdgeGCN:
+    activation: relu
+    decoder_activation: relu
+    decoder_layers: 3
+    encoder_activation: relu
+    encoder_layers: 0
+    hidden_features: 64
+    num_layers: 3
+    residual: false
+  EdgeGNN:
+    activation: relu
+    decoder_activation: relu
+    decoder_layers: 3
+    encoder_activation: relu
+    encoder_layers: 3
+    hidden_features: 64
+    mlp_layers: 3
+    num_layers: 3
+    residual: true
+  GAT:
+    activation: relu
+    add_self_loops: true
+    attn_bias: true
+    attn_residual: true
+    decoder_activation: relu
+    decoder_layers: 0
+    dropout: 0.0
+    encoder_activation: relu
+    encoder_layers: 0
+    hidden_features: 64
+    negative_slope: 0.2
+    num_heads: 1
+    num_layers: 3
+    residual: false
+    use_edge_features: false
+  GCN:
+    activation: relu
+    decoder_activation: relu
+    decoder_layers: 0
+    encoder_activation: relu
+    encoder_layers: 0
+    hidden_features: 64
+    num_layers: 3
+    residual: false
+  NodeEdgeGNNAttn:
+    activation: relu
+    attn_mlp_layers: 3
+    decoder_activation: relu
+    decoder_layers: 3
+    dropout: 0.0
+    encoder_activation: relu
+    encoder_layers: 3
+    hidden_features: 64
+    negative_slope: 0.2
+    num_layers: 3
+    residual: true
+  NodeGNN:
+    activation: relu
+    decoder_activation: relu
+    decoder_layers: 3
+    encoder_activation: relu
+    encoder_layers: 3
+    hidden_features: 64
+    mlp_layers: 3
+    num_layers: 3
+    residual: true
+testing_parameters:
+  log_path: null
+  output_dir: saved_metrics/mswegnn_cluster_best
+  rollout_start: 0
+  rollout_timesteps: null
+training_parameters:
+  adam_weight_decay: 0.0
+  autoregressive:
+    enabled: true
+    init_num_timesteps: 3
+    learning_rate_decay: 0.7
+    max_curriculum_epochs: 100
+    timestep_increment: 2
+    total_num_timesteps: 6
+  batch_size: 32
+  checkpoint_path: saved_models/mswegnn_cluster_best/DUALFloodGNN_2026-07-16_09-37-35.pt
+  early_stopping_patience: 15
+  gradient_clip_value: 0.25
+  learning_rate: 0.000338
+  log_path: logs/mswegnn_cluster_best.log
+  model_dir: saved_models/mswegnn_cluster_best
+  num_epochs: 0
+  num_epochs_dyn_loss: 0
+  stats_dir: training_stats/mswegnn_cluster_best
+  val_split_percent: 0.1
